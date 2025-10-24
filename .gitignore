@@ -1,0 +1,33 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints
+
+# VSCode
+.vscode/
+
+# macOS
+.DS_Store
+
+# Models and saved artifacts - do NOT commit large model files
+models/
+
+# Logs
+*.log
+
+# Byte-compiled / distribution
+build/
+dist/
+*.egg-info/
+
+# System files
+Thumbs.db
+desktop.ini

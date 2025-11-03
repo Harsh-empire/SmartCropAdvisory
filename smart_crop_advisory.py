@@ -6,6 +6,7 @@ import logging
 logging.getLogger("tensorflow").setLevel(logging.ERROR)
 
 import kagglehub
+from pathlib import Path
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
@@ -16,12 +17,29 @@ import joblib
 import matplotlib.pyplot as plt
 
 # Step 1: Download the dataset directly from Kaggle
-print("📥 Downloading dataset from Kaggle...")
-path = kagglehub.dataset_download("varshitanalluri/crop-recommendation-dataset")
-print("✅ Dataset downloaded at:", path)
+data_path_candidates = [
+    Path("Crop_recommendation.csv"),
+    Path("data") / "Crop_recommendation.csv",
+]
+
+# Try to use a local CSV if present, otherwise attempt Kaggle download
+data_path = None
+for p in data_path_candidates:
+    if p.exists():
+        data_path = str(p)
+        print(f"✅ Found local dataset at: {data_path}")
+        break
+
+if data_path is None:
+    try:
+        print("📥 Downloading dataset from Kaggle...")
+        path = kagglehub.dataset_download("varshitanalluri/crop-recommendation-dataset")
+        data_path = f"{path}/Crop_recommendation.csv"
+        print("✅ Dataset downloaded at:", path)
+    except Exception as _e:
+        raise RuntimeError("Dataset not found locally and Kaggle download failed. Please place 'Crop_recommendation.csv' in the repo root or install/configure kagglehub: " + str(_e))
 
 # Step 2: Load the dataset
-data_path = f"{path}/Crop_recommendation.csv"
 df = pd.read_csv(data_path)
 # Normalize column names and strip whitespace from string columns to avoid KeyError
 df.columns = df.columns.str.strip()
@@ -89,10 +107,18 @@ model = tf.keras.Sequential([
 model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
 
 # Step 5: Stacked ensemble training (K-fold stacking)
-print("🚀 Running stacking pipeline (ANN + XGBoost) using Stratified K-Fold...")
+print("🚀 Preparing training pipeline (ANN +/- XGBoost)...")
 from sklearn.model_selection import StratifiedKFold
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score
+
+# Check if xgboost is available; if not, fall back to ANN-only training
+try:
+    from xgboost import XGBClassifier  # type: ignore
+    xgb_available = True
+except Exception:
+    xgb_available = False
+    print("⚠️ xgboost not available — proceeding with ANN-only training and skipping stacking.")
 
 K = 5
 skf = StratifiedKFold(n_splits=K, shuffle=True, random_state=42)
@@ -100,7 +126,7 @@ n_classes = len(np.unique(y_encoded))
 
 # We'll create out-of-fold prediction matrices for the TRAINING partition (X_train)
 oof_ann = np.zeros((X_train.shape[0], n_classes))
-oof_xgb = np.zeros((X_train.shape[0], n_classes))
+oof_xgb = np.zeros((X_train.shape[0], n_classes)) if xgb_available else None
 
 def build_ann_model(input_dim, output_dim):
     m = tf.keras.Sequential([
@@ -116,37 +142,40 @@ def build_ann_model(input_dim, output_dim):
     m.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3), loss='categorical_crossentropy', metrics=['accuracy'])
     return m
 
-for fold, (tr_idx, val_idx) in enumerate(skf.split(X_train, y_train_enc)):
-    print(f"-- Fold {fold+1}/{K}")
-    X_tr, X_val = X_train[tr_idx], X_train[val_idx]
-    y_tr_enc_fold, y_val_enc_fold = y_train_enc[tr_idx], y_train_enc[val_idx]
-    y_tr_cat = tf.keras.utils.to_categorical(y_tr_enc_fold)
+if xgb_available:
+    for fold, (tr_idx, val_idx) in enumerate(skf.split(X_train, y_train_enc)):
+        print(f"-- Fold {fold+1}/{K}")
+        X_tr, X_val = X_train[tr_idx], X_train[val_idx]
+        y_tr_enc_fold, y_val_enc_fold = y_train_enc[tr_idx], y_train_enc[val_idx]
+        y_tr_cat = tf.keras.utils.to_categorical(y_tr_enc_fold)
 
-    # ANN for this fold
-    ann = build_ann_model(X_tr.shape[1], n_classes)
-    callbacks = [
-        tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=6, restore_best_weights=True),
-        tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3)
-    ]
-    ann.fit(X_tr, y_tr_cat, validation_data=(X_val, tf.keras.utils.to_categorical(y_val_enc_fold)),
-            epochs=60, batch_size=64, callbacks=callbacks, class_weight=class_weight_dict, verbose=0)
-    oof_ann[val_idx] = ann.predict(X_val)
+        # ANN for this fold
+        ann = build_ann_model(X_tr.shape[1], n_classes)
+        callbacks = [
+            tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=6, restore_best_weights=True),
+            tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3)
+        ]
+        ann.fit(X_tr, y_tr_cat, validation_data=(X_val, tf.keras.utils.to_categorical(y_val_enc_fold)),
+                epochs=60, batch_size=64, callbacks=callbacks, class_weight=class_weight_dict, verbose=0)
+        oof_ann[val_idx] = ann.predict(X_val)
 
-    # XGBoost for this fold
-    try:
-        from xgboost import XGBClassifier  # type: ignore
-    except Exception:
-        raise RuntimeError("xgboost is required for stacking. Install it with 'pip install xgboost'.")
-    xgb_fold = XGBClassifier(n_estimators=300, max_depth=6, learning_rate=0.1, use_label_encoder=False, eval_metric='mlogloss', n_jobs=-1)
-    sample_weight_fold = np.array([class_weight_dict[int(c)] for c in y_tr_enc_fold])
-    xgb_fold.fit(X_tr, y_tr_enc_fold, sample_weight=sample_weight_fold, verbose=False)
-    oof_xgb[val_idx] = xgb_fold.predict_proba(X_val)
+        # XGBoost for this fold
+        xgb_fold = XGBClassifier(n_estimators=100, max_depth=6, learning_rate=0.1, use_label_encoder=False, eval_metric='mlogloss', n_jobs=-1)
+        sample_weight_fold = np.array([class_weight_dict[int(c)] for c in y_tr_enc_fold])
+        xgb_fold.fit(X_tr, y_tr_enc_fold, sample_weight=sample_weight_fold, verbose=False)
+        oof_xgb[val_idx] = xgb_fold.predict_proba(X_val)
+else:
+    print("Skipping K-fold stacking because xgboost is not available.")
 
-# Train meta-learner on OOF predictions
-meta_X = np.hstack([oof_ann, oof_xgb])
-meta_y = y_train_enc
-meta_clf = LogisticRegression(max_iter=2000)
-meta_clf.fit(meta_X, meta_y)
+meta_clf = None
+if xgb_available:
+    # Train meta-learner on OOF predictions
+    meta_X = np.hstack([oof_ann, oof_xgb])
+    meta_y = y_train_enc
+    meta_clf = LogisticRegression(max_iter=2000)
+    meta_clf.fit(meta_X, meta_y)
+else:
+    print("Meta-learner not trained (requires xgboost stacking). Predictions will use ANN only.")
 
 # Train final base models on the full training partition
 print("\nTraining final base models on full training set...")
@@ -155,29 +184,49 @@ final_callbacks = [
     tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=6, restore_best_weights=True),
     tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3)
 ]
-final_ann.fit(X_train, tf.keras.utils.to_categorical(y_train_enc), epochs=60, batch_size=64, callbacks=final_callbacks, class_weight=class_weight_dict, verbose=1)
+# Use fewer epochs by default to keep runs quicker; user can increase for better accuracy
+final_ann.fit(X_train, tf.keras.utils.to_categorical(y_train_enc), epochs=20, batch_size=64, callbacks=final_callbacks, class_weight=class_weight_dict, verbose=1)
 
-final_xgb = XGBClassifier(n_estimators=300, max_depth=6, learning_rate=0.1, use_label_encoder=False, eval_metric='mlogloss', n_jobs=-1)
-sample_weight_full = np.array([class_weight_dict[int(c)] for c in y_train_enc])
-final_xgb.fit(X_train, y_train_enc, sample_weight=sample_weight_full, verbose=False)
+final_xgb = None
+if xgb_available:
+    final_xgb = XGBClassifier(n_estimators=100, max_depth=6, learning_rate=0.1, use_label_encoder=False, eval_metric='mlogloss', n_jobs=-1)
+    sample_weight_full = np.array([class_weight_dict[int(c)] for c in y_train_enc])
+    final_xgb.fit(X_train, y_train_enc, sample_weight=sample_weight_full, verbose=False)
 
 # Evaluate ensemble on held-out test set
+# Evaluate ensemble or ANN-only on held-out test set
 ann_test_proba = final_ann.predict(X_test)
-xgb_test_proba = final_xgb.predict_proba(X_test)
-meta_test_X = np.hstack([ann_test_proba, xgb_test_proba])
-meta_test_preds = meta_clf.predict(meta_test_X)
-ens_test_acc = accuracy_score(y_test_enc, meta_test_preds)
-print(f"✅ Stacked Ensemble Test Accuracy: {ens_test_acc * 100:.2f}%")
+if xgb_available and final_xgb is not None and meta_clf is not None:
+    xgb_test_proba = final_xgb.predict_proba(X_test)
+    meta_test_X = np.hstack([ann_test_proba, xgb_test_proba])
+    meta_test_preds = meta_clf.predict(meta_test_X)
+    ens_test_acc = accuracy_score(y_test_enc, meta_test_preds)
+    print(f"✅ Stacked Ensemble Test Accuracy: {ens_test_acc * 100:.2f}%")
+else:
+    ann_preds = np.argmax(ann_test_proba, axis=1)
+    ann_acc = accuracy_score(y_test_enc, ann_preds)
+    print(f"✅ ANN-only Test Accuracy: {ann_acc * 100:.2f}%")
 
 # Save final artifacts
 # Save artifacts (use native Keras format for the ANN to avoid legacy HDF5 warnings)
 os.makedirs("models", exist_ok=True)
 ann_keras_path = "models/crop_model.keras"
 final_ann.save(ann_keras_path)
-joblib.dump(final_xgb, "models/xgb_model.joblib")
-joblib.dump(encoder, "models/label_encoder.joblib")
-joblib.dump(scaler, "models/scaler.joblib")
-joblib.dump(meta_clf, "models/meta_model.joblib")
+if final_xgb is not None:
+    try:
+        joblib.dump(final_xgb, "models/xgb_model.joblib")
+    except Exception:
+        print("⚠️ Could not save XGBoost model artifact; continuing.")
+try:
+    joblib.dump(encoder, "models/label_encoder.joblib")
+    joblib.dump(scaler, "models/scaler.joblib")
+except Exception:
+    print("⚠️ Could not save encoder/scaler artifacts; continuing.")
+if meta_clf is not None:
+    try:
+        joblib.dump(meta_clf, "models/meta_model.joblib")
+    except Exception:
+        print("⚠️ Could not save meta_model artifact; continuing.")
 # Save feature names and a small background sample for SHAP
 try:
     feature_names = X.columns.tolist()

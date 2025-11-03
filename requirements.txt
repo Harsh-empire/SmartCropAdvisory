@@ -8,3 +8,13 @@ matplotlib
 joblib
 xgboost
 shap
+streamlit
+pandas
+numpy
+kagglehub
+scikit-learn
+tensorflow
+matplotlib
+joblib
+xgboost
+shap

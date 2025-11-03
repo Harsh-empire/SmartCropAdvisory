@@ -303,7 +303,38 @@ with st.expander("Why this prediction? (Explainable ML using SHAP)"):
                                     st.error("Repair attempt failed: " + str(_e))
                     else:
                         if st.button("Create normalized shap_background from current models/scaler"):
-                            st.info("No background to repair. You can re-run training to create a numeric background: python smart_crop_advisory.py")
+                            # Attempt to create a simple numeric background in the scaled feature space.
+                            try:
+                                if xgb_model is None:
+                                    st.error("XGBoost model is required to create a SHAP background. Train the full pipeline first.")
+                                else:
+                                    # input_scaled is available above; use its shape to determine number of features
+                                    try:
+                                        n_feat = input_scaled.shape[1]
+                                    except Exception:
+                                        # fallback: try feature_names length
+                                        n_feat = len(feature_names) if feature_names is not None else 7
+
+                                    # Create a simple zero-centered background in the scaled space (mean-like)
+                                    bg_size = 50
+                                    bg = np.zeros((bg_size, n_feat), dtype=float)
+                                    models_dir = Path('models')
+                                    models_dir.mkdir(parents=True, exist_ok=True)
+                                    bg_path = models_dir / 'shap_background.joblib'
+                                    joblib.dump(bg, str(bg_path))
+                                    st.success(f"Created numeric SHAP background at: {bg_path}")
+                                    # Try to programmatically rerun the app so SHAP picks up the new file
+                                    try:
+                                        if hasattr(st, 'experimental_rerun'):
+                                            st.experimental_rerun()
+                                        elif hasattr(st, 'rerun'):
+                                            st.rerun()
+                                        else:
+                                            st.info('Please refresh the browser to reload the app and apply the new SHAP background.')
+                                    except Exception:
+                                        st.info('Please refresh the browser to reload the app and apply the new SHAP background.')
+                            except Exception as _e:
+                                st.error("Could not create SHAP background: " + str(_e))
                 except Exception as _diag_e:
                     st.write("Could not inspect shap_background:", str(_diag_e))
 

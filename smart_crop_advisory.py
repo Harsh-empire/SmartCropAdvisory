@@ -185,7 +185,47 @@ final_callbacks = [
     tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3)
 ]
 # Use fewer epochs by default to keep runs quicker; user can increase for better accuracy
-final_ann.fit(X_train, tf.keras.utils.to_categorical(y_train_enc), epochs=20, batch_size=64, callbacks=final_callbacks, class_weight=class_weight_dict, verbose=1)
+history = final_ann.fit(
+    X_train,
+    tf.keras.utils.to_categorical(y_train_enc),
+    epochs=20,
+    batch_size=64,
+    callbacks=final_callbacks,
+    class_weight=class_weight_dict,
+    validation_data=(X_test, tf.keras.utils.to_categorical(y_test_enc)),
+    verbose=1,
+)
+
+# Persist training curves for quick inspection of model performance over epochs.
+try:
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    axes[0].plot(history.history.get('accuracy', []), label='train')
+    axes[0].plot(history.history.get('val_accuracy', []), label='validation')
+    axes[0].set_title('Accuracy')
+    axes[0].set_xlabel('Epoch')
+    axes[0].set_ylabel('Accuracy')
+    axes[0].legend()
+
+    axes[1].plot(history.history.get('loss', []), label='train')
+    axes[1].plot(history.history.get('val_loss', []), label='validation')
+    axes[1].set_title('Loss')
+    axes[1].set_xlabel('Epoch')
+    axes[1].set_ylabel('Loss')
+    axes[1].legend()
+
+    plt.tight_layout()
+    os.makedirs('models', exist_ok=True)
+    curves_path = Path('models') / 'training_curves.png'
+    fig.savefig(curves_path, dpi=150)
+    plt.close(fig)
+    print(f"📈 Saved training curves to: {curves_path}")
+
+    # Also persist the raw history so it can be inspected or plotted elsewhere.
+    history_path = Path('models') / 'training_history.csv'
+    pd.DataFrame(history.history).to_csv(history_path, index=False)
+    print(f"🗒️ Saved detailed training history to: {history_path}")
+except Exception as _plot_err:
+    print(f"⚠️ Could not generate training curve plot: {_plot_err}")
 
 final_xgb = None
 if xgb_available:
